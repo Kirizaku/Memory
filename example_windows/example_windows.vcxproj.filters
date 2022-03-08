@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\memory.cpp">
+      <Filter>Memory</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Memory">
+      <UniqueIdentifier>{71529178-a0e4-4e43-8437-7246daa940e9}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\memory.h">
+      <Filter>Memory</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
