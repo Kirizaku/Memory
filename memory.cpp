@@ -353,11 +353,10 @@ bool mem::write(mem_pid_t pid, void* src, void* dst, size_t size) {
 
 bool mem::nop_ex(mem_pid_t pid, void* src, size_t size) {
 	bool result = 0;
-	uint8_t* nop = new uint8_t[size];
-	if (!nop) return result;
-	memset(nop, 0x90, size);
-	result = write(pid, src, nop, size);
-	delete[] nop;
+	std::vector<uint8_t> nop;
+	nop.resize(size);
+	std::fill(nop.begin(), nop.end(), 0x90);
+	result = write(pid, src, nop.data(), size);
 	return result;
 }
 
