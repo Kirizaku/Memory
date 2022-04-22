@@ -277,11 +277,12 @@ bool mem::protect(mem_pid_t pid, void* src, size_t size, uintptr_t protection, u
 	strm << src;
 	std::string addr = strm.str();
 	addr.erase(addr.find("0x"), 2);
+	addr = addr + "-";
 
     size_t addr_protection_path = maps_file.str().find(addr);
 	if (addr_protection_path == maps_file.str().npos) { *old_protection = 0; return result; }
 
-	size_t addr_protection_start = maps_file.str().find(' ');
+	size_t addr_protection_start = maps_file.str().find(' ', addr_protection_path);
 	if (addr_protection_start == maps_file.str().npos) { *old_protection = 0; return result; }
 
 	size_t end = addr_protection_start + 4;
