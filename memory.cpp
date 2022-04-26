@@ -4,13 +4,13 @@
 void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1, void* arg2, void* arg3, void* arg4, void* arg5)
 {
 	void* result = 0;
-    ptrace(PTRACE_ATTACH, pid, NULL, NULL);
+    ptrace(PTRACE_ATTACH, pid, 0, 0);
 	
 	int status;
     wait(&status);
 
 	struct user_regs_struct regs, regs_backup;
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs_backup); 
+    ptrace(PTRACE_GETREGS, pid, 0, &regs_backup); 
 
     void* inject_address;
 	regs = regs_backup;
@@ -46,16 +46,16 @@ void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1,
 	}; //Fast System Call
 
 	uintptr_t injection_syscall;
-	memcpy(&injection_syscall, syscall_buffer, sizeof(injection_syscall));
+	std::memcpy(&injection_syscall, syscall_buffer, sizeof(injection_syscall));
 
-	uintptr_t old_poketext = ptrace(PTRACE_PEEKTEXT, pid, (void*)inject_address, NULL);
+	uintptr_t old_poketext = ptrace(PTRACE_PEEKTEXT, pid, (void*)inject_address, 0);
 	ptrace(PTRACE_POKETEXT, pid, (void*)inject_address, (void*)injection_syscall);
-    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-    ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL); 
+    ptrace(PTRACE_SETREGS, pid, 0, &regs);
+    ptrace(PTRACE_SINGLESTEP, pid, 0, 0); 
 
     waitpid(pid, &status, WSTOPPED);
 	
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    ptrace(PTRACE_GETREGS, pid, 0, &regs);
 
 	#if defined(__x86_64__)
     result = (void*)regs.rax;
@@ -64,14 +64,14 @@ void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1,
 	#endif
 
 	ptrace(PTRACE_POKETEXT, pid, (void*)inject_address, old_poketext);	
-    ptrace(PTRACE_SETREGS, pid, NULL, &regs_backup);
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    ptrace(PTRACE_SETREGS, pid, 0, &regs_backup);
+    ptrace(PTRACE_DETACH, pid, 0, 0);
 
 	return result;
 }
 #endif
 
-mem_pid_t mem::get_pid(mem_string process_name) {
+mem::mem_pid_t mem::get_pid(string_t process_name) {
 	mem_pid_t pid = 0;
 	#if defined(_WIN32)
 	HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -119,8 +119,8 @@ mem_pid_t mem::get_pid(mem_string process_name) {
 	return pid;
 }
 
-mem_string mem::get_process_name(mem_pid_t pid) {
-	mem_string process_name;
+mem::string_t mem::get_process_name(mem_pid_t pid) {
+	string_t process_name;
 	#if defined(_WIN32)
 	HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if (hSnap != INVALID_HANDLE_VALUE) {
@@ -130,7 +130,7 @@ mem_string mem::get_process_name(mem_pid_t pid) {
 		if (Process32First(hSnap, &process_entry)) {
 			do {
 				if (pid == process_entry.th32ProcessID) {
-					process_name = mem_string(process_entry.szExeFile);
+					process_name = string_t(process_entry.szExeFile);
 					break;
 				}
 			} while (Process32Next(hSnap, &process_entry));
@@ -155,7 +155,7 @@ mem_string mem::get_process_name(mem_pid_t pid) {
 	return process_name;
 }
 
-uintptr_t mem::get_module(mem_pid_t pid, mem_string module_name) {
+uintptr_t mem::get_module(mem_pid_t pid, string_t module_name) {
 	uintptr_t module_base = 0;
 	#if defined(_WIN32)
 	HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -185,15 +185,17 @@ uintptr_t mem::get_module(mem_pid_t pid, mem_string module_name) {
 	size_t module_base_path = maps_file.str().find(module_name);
 	size_t module_base_start = maps_file.str().rfind('\n', module_base_path);
 	if (module_base_start == maps_file.str().npos) { module_base_start = 0; }
+
 	size_t module_base_end = maps_file.str().find('-', module_base_path);
 	if(module_base_end == maps_file.str().npos) return module_base;
+	
 	module_base = std::stoul(maps_file.str().substr(module_base_start, module_base_end - module_base_start), nullptr, 16);
     maps_ifst.close();
 	#endif
 	return module_base;
 }
 
-uintptr_t mem::load_module(mem_pid_t pid, mem_string path) {
+uintptr_t mem::load_module(mem_pid_t pid, string_t path) {
 	uintptr_t module_base = 0;
 	#if defined(_WIN32)
 	size_t path_size = mem_len(path.c_str()) + 1;
@@ -223,7 +225,7 @@ void* mem::allocate(mem_pid_t pid, void* src, size_t size, uintptr_t protection)
 	#if defined(_WIN32)
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 	if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
-	result = VirtualAllocEx(hProcess, NULL, size, MEM_COMMIT | MEM_RESERVE, protection);
+	result = VirtualAllocEx(hProcess, 0, size, MEM_COMMIT | MEM_RESERVE, protection);
 	if (!result) result = FALSE;
 	CloseHandle(hProcess);
 	#else
@@ -234,8 +236,8 @@ void* mem::allocate(mem_pid_t pid, void* src, size_t size, uintptr_t protection)
 	syscall_id = __NR_mmap2;
 	#endif
 
-	result = inject_syscall(pid, syscall_id, NULL, (void*)size, (void*)protection, (void*)(MAP_PRIVATE | MAP_ANON), NULL, NULL);
-	if (!result) result = 0;
+	result = inject_syscall(pid, syscall_id, 0, (void*)size, (void*)protection, (void*)(MAP_PRIVATE | MAP_ANON), 0, 0);
+	if (result == ((void *)syscall_id) || result == MAP_FAILED) result = 0;
 	#endif
 	return result;
 }
@@ -248,7 +250,7 @@ bool mem::deallocate(mem_pid_t pid, void* src, size_t size) {
 	result = VirtualFreeEx(hProcess, src, 0, MEM_RELEASE) != 0 ? true : false;
 	CloseHandle(hProcess);
 	#else
-	result = inject_syscall(pid, __NR_munmap, src, (void*)size, NULL, NULL, NULL, NULL) != MAP_FAILED ? true : false;
+	result = inject_syscall(pid, __NR_munmap, src, (void*)size, 0, 0, 0, 0) == 0 ? true : false;
 	#endif
 	return result;
 }
@@ -291,25 +293,118 @@ bool mem::protect(mem_pid_t pid, void* src, size_t size, uintptr_t protection, u
 	for(size_t i = addr_protection_start; i < end; i++)
 	{
 		char c = maps_file.str()[i];
-		switch(c)
-		{
-			case 'r':
-			prot |= PROT_READ;
-			break;
-
-			case 'w':
-			prot |= PROT_WRITE;
-			break;
-
-			case 'x':
-			prot |= PROT_EXEC;
-			break;
+		switch(c) {
+			case 'r': 	prot |= PROT_READ;		break;
+			case 'w':	prot |= PROT_WRITE;		break;
+			case 'x':	prot |= PROT_EXEC; 		break;
 		}
 	}
 	*old_protection = prot;
     maps_ifst.close();
+	}
+	result = inject_syscall(pid, __NR_mprotect, src, (void*)size, (void*)protection, 0, 0, 0) == 0 ? true : false;
+	#endif
+	return result;
 }
-	result = inject_syscall(pid, __NR_mprotect, src, (void*)size, (void*)protection, NULL, NULL, NULL) != 0 ? true : false;
+
+bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
+{
+	bool result = 0;
+	#if defined(_WIN32)
+	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+	if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
+
+	MEMORY_BASIC_INFORMATION mbi;
+	result = (size_t)VirtualQueryEx(hProcess, (LPCVOID)src, &mbi, sizeof(mbi)) != 0 ? true : false;
+	if (result) {
+		mi->base_address		= mbi.BaseAddress;
+		mi->allocation_base		= mbi.AllocationBase;
+		mi->allocation_protect	= mbi.AllocationProtect;
+		#if defined(_WIN64)
+		mi->partition_id		= mbi.PartitionId;
+		#endif
+		mi->size				= mbi.RegionSize;
+		mi->state				= mbi.State;
+		mi->protect				= mbi.Protect;
+		mi->type				= mbi.Type;
+	}
+	CloseHandle(hProcess);
+	#else
+	std::stringstream maps_file;
+	maps_file << "/proc/" << pid << "/maps";
+	std::ifstream maps_ifst(maps_file.str());
+
+	if(!maps_ifst.is_open()) return result;
+
+	maps_file.str(std::string());
+	maps_file << maps_ifst.rdbuf();
+
+	bool temp = false;
+	uintptr_t base_address = 0;
+	size_t base_address_start = 0;
+	size_t base_address_end = 0;
+	size_t base_address_end_temp = 0;
+
+    while (true)
+	{
+		if (temp) {
+			base_address_start = maps_file.str().find("\n", base_address_end_temp);
+		 	if (base_address_start == maps_file.str().npos) return result;
+		}
+
+		base_address_end_temp = maps_file.str().find('-', base_address_start);
+		if(base_address_end_temp == maps_file.str().npos) return result;
+		
+		uintptr_t base_address_temp = std::stoul(maps_file.str().substr(base_address_start, base_address_end_temp - base_address_start), nullptr, 16);
+
+		if ((void*)base_address_temp < src) { 
+			base_address = base_address_temp;
+			base_address_end = base_address_end_temp;
+		}
+		else if (!base_address || (void*)base_address_temp == src) {
+			base_address = base_address_temp;
+			base_address_end = base_address_end_temp;
+			mi->base_address = (void*)base_address;
+			uintptr_t next_address_start = maps_file.str().find("\n", base_address_end_temp);
+			uintptr_t next_address_end = maps_file.str().find('-', next_address_start);
+			if(next_address_end == maps_file.str().npos) { mi->next_address = 0; break; }
+			uintptr_t next_address = std::stoul(maps_file.str().substr(next_address_start, next_address_end - next_address_start), nullptr, 16);		
+			mi->next_address = (void*)next_address;
+			break;
+		}
+		else { 
+			mi->base_address = (void*)base_address;
+			mi->next_address = (void*)base_address_temp;
+			break; 
+		}
+		temp = true;
+	}
+	size_t end_address_start = maps_file.str().find(' ', base_address_end);
+	if(end_address_start == maps_file.str().npos) return result;
+	uintptr_t end_address = std::stoul(maps_file.str().substr(base_address_end + 1, end_address_start - (base_address_end + 1)), nullptr, 16);
+
+	uintptr_t address_size = end_address - base_address;
+
+	intptr_t prot = 0, flags = 0;
+	size_t end = end_address_start + 5;
+	for(size_t i = end_address_start; i < end; i++)
+	{
+		char c = maps_file.str()[i];
+		switch(c) {
+			case 'r': 	prot |= PROT_READ; 	 	break;
+			case 'w':	prot |= PROT_WRITE;	 	break;
+			case 'x':	prot |= PROT_EXEC;	 	break;
+			case 'p':	flags = MAP_PRIVATE; 	break;
+			case 's':	flags = MAP_SHARED;		break;
+		}
+	}
+	maps_ifst.close();
+
+	mi->size = address_size;
+	mi->protect = prot;
+	mi->type = flags;
+	
+	result = true;
 	#endif
 	return result;
 }
@@ -319,7 +414,7 @@ bool mem::read(mem_pid_t pid, void* src, void* dst, size_t size) {
 	#if defined(_WIN32)
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 	if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
-	result = ReadProcessMemory(hProcess, (LPCVOID)src, dst, size, NULL) != 0 ? true : false;
+	result = ReadProcessMemory(hProcess, (LPCVOID)src, dst, size, 0) != 0 ? true : false;
 	CloseHandle(hProcess);
 	#else
 	struct iovec iosrc;
@@ -338,7 +433,7 @@ bool mem::write(mem_pid_t pid, void* src, void* dst, size_t size) {
 	#if defined(_WIN32)
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 	if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
-	result = WriteProcessMemory(hProcess, src, (LPCVOID)dst, size, NULL) != 0 ? true : false;
+	result = WriteProcessMemory(hProcess, src, (LPCVOID)dst, size, 0) != 0 ? true : false;
 	CloseHandle(hProcess);
 	#else
 	struct iovec iosrc;
@@ -369,4 +464,73 @@ uintptr_t mem::read_pointer(mem_pid_t pid, uintptr_t src, std::vector<uintptr_t>
 		addr += offsets[i];
 	}
 	return addr;
+}
+
+uintptr_t mem::aob_scan(mem_pid_t pid, const char* pattern, const char* mask, char* begin, char* end)
+{
+	uintptr_t result = 0;
+	char* current_address = begin;
+
+	while (current_address < end)
+	{
+		memory_information mi;
+
+		if (!query(pid, current_address, &mi))
+		{
+			return result;
+		}
+
+		#if defined(_WIN32)
+		if (mi.state == MEM_COMMIT && mi.protect != protection::NONE)
+		#else
+		current_address = (char*)mi.base_address;
+		if (mi.protect != protection::NONE)
+		#endif
+		{
+			uintptr_t old_protect = 0;
+			char* buffer = new char[mi.size];
+
+			if (protect(pid, mi.base_address, mi.size, protection::READ_WRITE_EXECUTE, &old_protect))
+			{
+				read(pid, mi.base_address, buffer, mi.size);
+				protect(pid, mi.base_address, mi.size, old_protect, &old_protect);
+
+				char* internal_address = 0;
+				size_t pattern_length = std::strlen(mask);
+
+				for (size_t i = 0; i < mi.size - pattern_length; i++)
+				{
+					bool found = true;
+					for (size_t j = 0; j < pattern_length; j++)
+					{
+						if (mask[j] != '?' && pattern[j] != *(buffer + i + j))
+						{
+							found = false;
+							break;
+						}
+					}
+					if (found)
+					{
+						internal_address = buffer + i;
+					}
+				}
+
+				if (internal_address != 0)
+				{
+					uintptr_t offset_from_buffer = internal_address - buffer;
+					result = (uintptr_t)current_address + offset_from_buffer;
+					delete[] buffer;
+					break;
+				}
+			}
+			delete[] buffer;
+		}
+		#if defined(_WIN32)
+		current_address = current_address + mi.size;
+		#else
+		current_address = (char*)mi.next_address;
+		if (!current_address) return result;
+		#endif
+	}
+	return result;
 }

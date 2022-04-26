@@ -11,24 +11,18 @@
 #define PROCESS_MODULE "example"
 #endif
 
-#if defined(_WIN32)
-#define PROTECTION PAGE_EXECUTE_READWRITE
-#else
-#define PROTECTION PROT_EXEC | PROT_READ | PROT_WRITE
-#endif
-
 int main()
 {
-	mem_pid_t process_pid = mem::get_pid(PROCESS_NAME);
+	mem::mem_pid_t process_pid = mem::get_pid(PROCESS_NAME);
 	stdcout << "Process PID: " << process_pid << "\n";
 
-	mem_string process_name = mem::get_process_name(process_pid);
+	mem::string_t process_name = mem::get_process_name(process_pid);
 	stdcout << "Process Name: " << process_name << "\n";
 
 	uintptr_t process_module = mem::get_module(process_pid, PROCESS_MODULE);
-	stdcout << "Module Base: " << (void*)process_module << "\n";
+	stdcout << "Module Base: " << (void*)process_module << "\n\n";
 
-	void* path_address = mem::allocate(process_pid, NULL, 4096, PROTECTION);
+	void* path_address = mem::allocate(process_pid, 0, 4096, mem::protection::READ_WRITE_EXECUTE);
 	stdcout << "Allocated address: " << path_address << "\n";
 
 	int write_value = 12345;
@@ -39,10 +33,20 @@ int main()
 	mem::read(process_pid, path_address, &read_value, sizeof(read_value));
 	stdcout << "Read allocate value: " << read_value << "\n\n";
 
+	mem::memory_information mi;
+	mem::query(process_pid, path_address, &mi);
+	stdcout << "Query Base Address: " << mi.base_address << "\n";
+	#if defined(__linux__)
+	stdcout << "Query Next Address: " << mi.next_address << "\n";
+	#endif
+	stdcout << "Query size: " << (void*)mi.size << "\n";
+	stdcout << "Query Protect: " << mi.protect << "\n";
+	stdcout << "Query Flags/type: " << mi.type << "\n\n";
+
 	stdcout << "Press [ENTER] to exit...";
 	std::cin.get();
 
-	mem::deallocate(process_pid, path_address, 4096);
+	mem::deallocate(process_pid, path_address, 4096); 
 
 	return 0;
 }
