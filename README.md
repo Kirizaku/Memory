@@ -5,7 +5,7 @@ Windows, Linux memory hacking library C++ (WIP)
 # Features
 - Get pid by name.
 - Get the base module.
-- Inject modules **[Only Windows] [Working on it]**
+- Inject modules
 - Allocate and free virtual memory
 - Change memory protection
 - Query information about a range of pages in the virtual memory
