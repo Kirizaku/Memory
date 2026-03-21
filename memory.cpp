@@ -1,7 +1,7 @@
 /*
 * Memory Hacking Library C++
 * by Daniil Nabiulin
-* version 1.0.3
+* version 1.0.4
 * https://github.com/kirizaku/memory
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -47,38 +47,127 @@ SOFTWARE.
 #include <sys/mman.h>
 #endif
 
-#define LOG_ERROR(msg) do { \
-    std::cerr << "[ERROR] " << msg << " (errno: " << errno << ")" << std::endl; \
+#define LOG_ERROR(fmt, ...) do { \
+std::cerr << "[ERROR] "; \
+    fprintf(stderr, fmt, ##__VA_ARGS__); \
+    std::cerr << " (errno: " << errno << ")" << std::endl; \
 } while(0)
 
 #if defined(__linux__)
-void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1, void* arg2, void* arg3, void* arg4, void* arg5)
+    static bool ptrace_attach(mem::mem_pid_t pid)
+    {
+        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
+            LOG_ERROR("Failed to attach to process");
+            return false;
+        }
+
+        int status;
+        wait(&status);
+
+        if (!WIFSTOPPED(status)) {
+            LOG_ERROR("Process not stopped after attach");
+            ptrace(PTRACE_DETACH, pid, 0, 0);
+            return false;
+        }
+
+        return true;
+    }
+
+static bool ptrace_get_regs(mem::mem_pid_t pid, struct user_regs_struct* regs)
 {
-    void* result = 0;
-    if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to attach to process");
-        return result;
+    if (ptrace(PTRACE_GETREGS, pid, 0, regs) == -1) {
+        LOG_ERROR("Failed to get registers");
+        return false;
+    }
+    return true;
+}
+
+static bool ptrace_set_regs(mem::mem_pid_t pid, struct user_regs_struct* regs)
+{
+    if (ptrace(PTRACE_SETREGS, pid, 0, regs) == -1) {
+        LOG_ERROR("Failed to set registers");
+        return false;
+    }
+    return true;
+}
+
+static uintptr_t ptrace_peek_text(mem::mem_pid_t pid, void* addr)
+{
+    uintptr_t value = ptrace(PTRACE_PEEKTEXT, pid, addr, 0);
+    if (value == -1) {
+        LOG_ERROR("Failed to peek text");
+    }
+    return value;
+}
+
+static bool ptrace_poke_text(mem::mem_pid_t pid, void* addr, uintptr_t value)
+{
+    if (ptrace(PTRACE_POKETEXT, pid, addr, (void*)value) == -1) {
+        LOG_ERROR("Failed to poke text");
+        return false;
+    }
+    return true;
+}
+
+static bool ptrace_single_step(mem::mem_pid_t pid)
+{
+    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1) {
+        LOG_ERROR("Failed to single step");
+        return false;
     }
 
     int status;
-    wait(&status);
+    waitpid(pid, &status, WSTOPPED);
 
     if (!WIFSTOPPED(status)) {
-        LOG_ERROR("Process not stopped after attach");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
-        return result;
+        LOG_ERROR("Process not stopped after single step");
+        return false;
     }
 
+    return true;
+}
+
+static bool ptrace_continue(mem::mem_pid_t pid)
+{
+    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
+        LOG_ERROR("Failed to continue process");
+        return false;
+    }
+
+    int status;
+    waitpid(pid, &status, WSTOPPED);
+
+    if (!WIFSTOPPED(status)) {
+        LOG_ERROR("Process not stopped after execution");
+        return false;
+    }
+
+    return true;
+}
+
+static void ptrace_detach(mem::mem_pid_t pid)
+{
+    if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
+        LOG_ERROR("Failed to detach from process");
+    }
+}
+
+void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1, void* arg2, void* arg3, void* arg4, void* arg5)
+{
+    void* result = nullptr;
+
+    if (!ptrace_attach(pid)) return result;
+
     struct user_regs_struct regs, regs_backup;
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs_backup) == -1) {
-        LOG_ERROR("Failed to get registers");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_get_regs(pid, &regs_backup)) {
+        ptrace_detach(pid);
         return result;
     }
 
     void* code_addr;
     regs = regs_backup;
-    #if defined(__x86_64__)
+
+#if defined(__x86_64__)
     regs.rax = (uintptr_t)syscall_id;
     regs.rdi = (uintptr_t)arg0;
     regs.rsi = (uintptr_t)arg1;
@@ -88,7 +177,7 @@ void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1,
     regs.r9  = (uintptr_t)arg5;
 
     code_addr = (void*)regs.rip;
-    #else
+#else
     regs.eax = (uintptr_t)syscall_id;
     regs.ebx = (uintptr_t)arg0;
     regs.ecx = (uintptr_t)arg1;
@@ -98,112 +187,79 @@ void* mem::inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1,
     regs.ebp = (uintptr_t)arg5;
 
     code_addr = (void*)regs.eip;
-    #endif
+#endif
 
     const uint8_t syscall_buffer[] = {
-    #if defined(__x86_64__)
-    0x0F,0x05
-    #else
-    0xcd,0x80
-    #endif
+#if defined(__x86_64__)
+        0x0F,0x05
+#else
+        0xcd,0x80
+#endif
     }; //Fast System Call
 
-    uintptr_t injection_syscall;
-    std::memcpy(&injection_syscall, syscall_buffer, sizeof(injection_syscall));
+    uintptr_t injection_syscall = 0;
+    std::memcpy(&injection_syscall, syscall_buffer, 2);
 
-    uintptr_t original_code = ptrace(PTRACE_PEEKTEXT, pid, (void*)code_addr, 0);
+    uintptr_t original_code = ptrace_peek_text(pid, code_addr);
     if (original_code == -1) {
-        LOG_ERROR("Failed to peek text");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+        ptrace_detach(pid);
         return result;
     }
 
-    if (ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, (void*)injection_syscall) == -1) {
-        LOG_ERROR("Failed to poke text");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_poke_text(pid, code_addr, injection_syscall)) {
+        ptrace_detach(pid);
         return result;
     }
 
-    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) {
-        LOG_ERROR("Failed to set registers");
-        ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, (void*)original_code);
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_set_regs(pid, &regs)) {
+        ptrace_poke_text(pid, code_addr, original_code);
+        ptrace_detach(pid);
         return result;
     }
 
-    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to single step");
-        ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, (void*)original_code);
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_single_step(pid)) {
+        ptrace_poke_text(pid, code_addr, original_code);
+        ptrace_detach(pid);
         return result;
     }
 
-    waitpid(pid, &status, WSTOPPED);
+    ptrace_get_regs(pid, &regs);
 
-    if (!WIFSTOPPED(status)) {
-        LOG_ERROR("Process not stopped after single step");
-    }
-
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
-        LOG_ERROR("Failed to get registers after execution");
-    }
-
-    #if defined(__x86_64__)
+#if defined(__x86_64__)
     result = (void*)regs.rax;
-    #else
+#else
     result = (void*)regs.eax;
-    #endif
+#endif
 
-    if (ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, original_code) == -1) {
-        LOG_ERROR("Failed to restore original code");
-    }
-
-    if (ptrace(PTRACE_SETREGS, pid, 0, &regs_backup) == -1) {
-        LOG_ERROR("Failed to restore registers");
-    }
-
-    if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to detach from process");
-    }
+    ptrace_poke_text(pid, code_addr, original_code);
+    ptrace_set_regs(pid, &regs_backup);
+    ptrace_detach(pid);
 
     return result;
 }
 
-void* mem::inject_call_function(mem_pid_t pid, void* code_addr, void* dlopen_addr, void* arg0, void* arg1)
+mem::inject_call_result_t mem::inject_call_function(mem_pid_t pid, void* code_addr, void* dlopen_addr, void* arg0, void* arg1)
 {
-    void* result = 0;
+    inject_call_result_t result = {false, nullptr};
 
-    if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to attach to process");
-        return result;
-    }
-
-    int status;
-    wait(&status);
-
-    if (!WIFSTOPPED(status)) {
-        LOG_ERROR("Process not stopped after attach");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
-        return result;
-    }
+    if (!ptrace_attach(pid)) return result;
 
     struct user_regs_struct regs, regs_backup;
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs_backup) == -1) {
-        LOG_ERROR("Failed to get registers");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_get_regs(pid, &regs_backup)) {
+        ptrace_detach(pid);
         return result;
     }
 
-    #if defined(__x86_64__)
     regs = regs_backup;
+
+#if defined(__x86_64__)
     regs.rip = (uintptr_t)code_addr;
     regs.rsp -= (regs.rsp) % 16;
     regs.rbp = regs.rsp - 8;
     regs.rax = (uintptr_t)dlopen_addr;
     regs.rsi = (uintptr_t)arg1;
     regs.rdi = (uintptr_t)arg0;
-    #else
-    regs = regs_backup;
+#else
     regs.esp -= (regs.esp % 16);
     regs.esp -= 4;
     regs.eip = (uintptr_t)code_addr;
@@ -212,72 +268,54 @@ void* mem::inject_call_function(mem_pid_t pid, void* code_addr, void* dlopen_add
     ptrace(PTRACE_POKEDATA, pid, (void*)regs.esp, (void*)arg1);
     regs.esp -= 4;
     ptrace(PTRACE_POKEDATA, pid, (void*)regs.esp, arg0);
-    #endif
+#endif
 
     const uint8_t call_function_buffer[] = {
-    0xff,0xd0, 0xcc
+        0xff, 0xd0, 0xcc
     }; // Call Function
 
-    uintptr_t original_code = ptrace(PTRACE_PEEKTEXT, pid, (void*)code_addr, 0);
+    uintptr_t original_code = ptrace_peek_text(pid, code_addr);
     if (original_code == -1) {
-        LOG_ERROR("Failed to peek text");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+        ptrace_detach(pid);
         return result;
     }
 
-    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) {
-        LOG_ERROR("Failed to set registers");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_set_regs(pid, &regs)) {
+        ptrace_poke_text(pid, code_addr, original_code);
+        ptrace_detach(pid);
         return result;
     }
 
-    uintptr_t injection_callfunc;
-    std::memcpy(&injection_callfunc, call_function_buffer, sizeof(injection_callfunc));
-    if (ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, (void*)injection_callfunc) == -1) {
-        LOG_ERROR("Failed to inject call function");
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    uintptr_t injection_callfunc = 0;
+    std::memcpy(&injection_callfunc, call_function_buffer, 3);
+    if (!ptrace_poke_text(pid, code_addr, injection_callfunc)) {
+        ptrace_detach(pid);
         return result;
     }
 
-    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to continue process");
-        ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, original_code);
-        ptrace(PTRACE_DETACH, pid, 0, 0);
+    if (!ptrace_continue(pid)) {
+        ptrace_poke_text(pid, code_addr, original_code);
+        ptrace_detach(pid);
         return result;
     }
 
-    waitpid(pid, &status, WSTOPPED);
+    ptrace_get_regs(pid, &regs);
+    ptrace_set_regs(pid, &regs_backup);
 
-    if (!WIFSTOPPED(status)) {
-        LOG_ERROR("Process not stopped after execution");
-    }
+    result.success = true;
+#if defined(__x86_64__)
+    result.value = (void*)regs.rax;
+#else
+    result.value = (void*)regs.eax;
+#endif
 
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
-        LOG_ERROR("Failed to get registers after execution");
-    }
-
-    if (ptrace(PTRACE_SETREGS, pid, 0, &regs_backup) == -1) {
-        LOG_ERROR("Failed to restore registers");
-    }
-
-    #if defined(__x86_64__)
-    result = (void*)regs.rax;
-    #else
-    result = (void*)regs.eax;
-    #endif
-
-    if (ptrace(PTRACE_POKETEXT, pid, (void*)code_addr, (void*)original_code) == -1) {
-        LOG_ERROR("Failed to restore original code");
-    }
-
-    if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-        LOG_ERROR("Failed to detach from process");
-    }
+    ptrace_poke_text(pid, code_addr, original_code);
+    ptrace_detach(pid);
 
     return result;
 }
 
-uintptr_t mem::get_dlopen_address()
+static uintptr_t get_function_offset(const char* func_name)
 {
     void* handle = dlopen("libc.so.6", RTLD_LAZY);
     if (!handle) {
@@ -287,11 +325,11 @@ uintptr_t mem::get_dlopen_address()
 
     dlerror();
 
-    void* dlopen_addr = dlsym(handle, "dlopen");
+    void* dlopen_addr = dlsym(handle, func_name);
     const char* error = dlerror();
 
     if (error) {
-        LOG_ERROR("Failed to find dlopen");
+        LOG_ERROR("Failed to find %s", func_name);
         dlclose(handle);
         return 0;
     }
@@ -308,12 +346,12 @@ uintptr_t mem::get_dlopen_address()
     dlclose(handle);
     return 0;
 }
-
 #endif
 
-mem::mem_pid_t mem::get_pid(string_t process_name) {
+mem::mem_pid_t mem::get_pid(string_t process_name)
+{
     mem_pid_t pid = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 
     if (hSnap != INVALID_HANDLE_VALUE) {
@@ -330,37 +368,38 @@ mem::mem_pid_t mem::get_pid(string_t process_name) {
         }
     }
     CloseHandle(hSnap);
-    #else
-    DIR* dir = opendir("/proc");
-    if (dir) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            int id = atoi(entry->d_name);
-            if (id > 0) {
-                std::string comm_path = "/proc/" + std::string(entry->d_name) + "/comm";
-                std::ifstream comm_file(comm_path);
-                if (!comm_file) {
-                    continue;
-                }
+#else
+        DIR* dir = opendir("/proc");
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                int id = atoi(entry->d_name);
+                if (id > 0) {
+                    std::string comm_path = "/proc/" + std::string(entry->d_name) + "/comm";
+                    std::ifstream comm_file(comm_path);
+                    if (!comm_file) {
+                        continue;
+                    }
 
-                std::string comm;
-                std::getline(comm_file, comm);
-                comm_file.close();
+                    std::string comm;
+                    std::getline(comm_file, comm);
+                    comm_file.close();
 
-                if (comm == process_name) {
-                    pid = id;
-                    break;
+                    if (comm == process_name) {
+                        pid = id;
+                        break;
+                    }
                 }
-            }
-        } closedir(dir);
-    }
-    #endif
+            } closedir(dir);
+        }
+#endif
     return pid;
 }
 
-mem::string_t mem::get_process_name(mem_pid_t pid) {
+mem::string_t mem::get_process_name(mem_pid_t pid)
+{
     string_t process_name;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32 process_entry;
@@ -376,7 +415,7 @@ mem::string_t mem::get_process_name(mem_pid_t pid) {
         }
     }
     CloseHandle(hSnap);
-    #else
+#else
     std::stringstream comm_file_stream;
     comm_file_stream << "/proc/" << pid << "/comm";
     std::ifstream comm_file(comm_file_stream.str());
@@ -385,13 +424,14 @@ mem::string_t mem::get_process_name(mem_pid_t pid) {
         std::getline(comm_file, process_name);
     }
     comm_file.close();
-    #endif
+#endif
     return process_name;
 }
 
-uintptr_t mem::get_module(mem_pid_t pid, string_t module_name) {
+uintptr_t mem::get_module(mem_pid_t pid, string_t module_name)
+{
     uintptr_t module_base = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (hSnap != INVALID_HANDLE_VALUE) {
         MODULEENTRY32 module_entry;
@@ -406,7 +446,7 @@ uintptr_t mem::get_module(mem_pid_t pid, string_t module_name) {
         }
     }
     CloseHandle(hSnap);
-    #else
+#else
     std::stringstream maps_file;
     maps_file << "/proc/" << pid << "/maps";
     std::ifstream maps_ifst(maps_file.str());
@@ -423,33 +463,41 @@ uintptr_t mem::get_module(mem_pid_t pid, string_t module_name) {
     size_t module_base_end = maps_file.str().find('-', module_base_path);
     if(module_base_end == maps_file.str().npos) return module_base;
 
-    module_base = std::stoul(maps_file.str().substr(module_base_start, module_base_end - module_base_start), nullptr, 16);
+    module_base = std::stoull(maps_file.str().substr(module_base_start, module_base_end - module_base_start), nullptr, 16);
     maps_ifst.close();
-    #endif
+#endif
     return module_base;
 }
 
-uintptr_t mem::load_module(mem_pid_t pid, string_t path) {
-    uintptr_t module_base = 0;
-    #if defined(_WIN32)
+mem::module_handle_t mem::load_module(mem_pid_t pid, string_t path)
+{
+    module_handle_t result;
+#if defined(_WIN32)
     size_t path_size = mem_len(path.c_str()) + 1;
     void* path_address = allocate(pid, 0, path_size, PAGE_EXECUTE_READWRITE);
-    if (path_address == 0) return module_base;
+    if (!path_address) return result;
     write(pid, path_address, (LPCVOID*)path.c_str(), path_size);
 
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (hProcess && hProcess != INVALID_HANDLE_VALUE) {
-        HANDLE hThread = (HANDLE)CreateRemoteThread(hProcess, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibrary, path_address, 0, 0);
-        if (hThread) {
-            WaitForSingleObject(hThread, INFINITE);
-            CloseHandle(hThread);
-        }
-        CloseHandle(hProcess);
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE) {
+        deallocate(pid, path_address, path_size);
+        return result;
     }
+
+    HANDLE hThread = CreateRemoteThread(hProcess, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, path_address, 0, 0);
+    if (hThread) {
+        WaitForSingleObject(hThread, INFINITE);
+        DWORD remote_mod_handle = 0;
+        GetExitCodeThread(hThread, &remote_mod_handle);
+        result.handle = (void*)(uintptr_t)remote_mod_handle;
+        CloseHandle(hThread);
+    }
+
+    CloseHandle(hProcess);
     deallocate(pid, path_address, path_size);
-    #else
+#else
     uintptr_t glibc_module = mem::get_module(pid, "libc.so.6");
-    uintptr_t dlopen_offset = mem::get_dlopen_address();
+    uintptr_t dlopen_offset = get_function_offset("dlopen");
     uintptr_t dlopen_addr = glibc_module + dlopen_offset;
 
     size_t path_size = mem_len(path.c_str()) + 1;
@@ -457,109 +505,148 @@ uintptr_t mem::load_module(mem_pid_t pid, string_t path) {
     size_t stack_size = 2 * 1024 * 1024;
 
     void* path_address = allocate(pid, 0, text_size + stack_size, protection::READ_WRITE_EXECUTE);
+    if (!path_address) return result;
     mem::write(pid, path_address, (void*)path.c_str(), path_size);
 
     void* code_addr = (void*)((uintptr_t)path_address + path_size);
-    inject_call_function(pid, (void*)code_addr, (void*)dlopen_addr, path_address, (void*)RTLD_LAZY);
-
+    inject_call_result_t res = inject_call_function(pid, (void*)code_addr, (void*)dlopen_addr, path_address, (void*)RTLD_LAZY);
+    result.handle = res.value;
     mem::deallocate(pid, path_address, text_size + stack_size);
-
-    #endif
-    module_base = get_module(pid, path);
-    return module_base;
+#endif
+    result.base = get_module(pid, path);
+    return result;
 }
 
-void* mem::allocate(mem_pid_t pid, void* src, size_t size, uintptr_t protection) {
-    void* result = 0;
-    #if defined(_WIN32)
+bool mem::unload_module(mem_pid_t pid, module_handle_t module)
+{
+    bool result = 0;
+#if defined(_WIN32)
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
+
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)FreeLibrary, (void*)module.base, 0, NULL);
+    if (!hThread) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    WaitForSingleObject(hThread, INFINITE);
+
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+    result = (exitCode != 0);
+
+    CloseHandle(hThread);
+    CloseHandle(hProcess);
+#else
+    uintptr_t glibc_module = mem::get_module(pid, "libc.so.6");
+    uintptr_t dlclose_offset = get_function_offset("dlclose");
+    uintptr_t dlclose_addr = glibc_module + dlclose_offset;
+
+    size_t path_size = sysconf(_SC_PAGESIZE);
+    void* path_address = allocate(pid, 0, path_size, protection::READ_WRITE_EXECUTE);
+    if (!path_address) return result;
+
+    inject_call_result_t res = inject_call_function(pid, (void*)path_address, (void*)dlclose_addr, module.handle, nullptr);
+    result = (res.success && res.value == 0) ? true : false;
+    mem::deallocate(pid, path_address, path_size);
+#endif
+    return result;
+}
+
+void* mem::allocate(mem_pid_t pid, void* src, size_t size, uintptr_t protection)
+{
+    void* result = nullptr;
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
     result = VirtualAllocEx(hProcess, 0, size, MEM_COMMIT | MEM_RESERVE, protection);
     if (!result) result = FALSE;
     CloseHandle(hProcess);
-    #else
+#else
     int syscall_id = 0;
-    #if defined(__x86_64__)
+#if defined(__x86_64__)
     syscall_id = __NR_mmap;
-    #else
+#else
     syscall_id = __NR_mmap2;
-    #endif
-
+#endif
     result = inject_syscall(pid, syscall_id, 0, (void*)size, (void*)protection, (void*)(MAP_PRIVATE | MAP_ANON), 0, 0);
-    if (result == ((void *)syscall_id) || result == MAP_FAILED) result = 0;
-    #endif
+    if (result == ((void*)(uintptr_t)syscall_id) || result == MAP_FAILED) result = 0;
+#endif
     return result;
 }
 
-bool mem::deallocate(mem_pid_t pid, void* src, size_t size) {
+bool mem::deallocate(mem_pid_t pid, void* src, size_t size)
+{
     bool result = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
     result = VirtualFreeEx(hProcess, src, 0, MEM_RELEASE) != 0 ? true : false;
     CloseHandle(hProcess);
-    #else
+#else
     result = inject_syscall(pid, __NR_munmap, src, (void*)size, 0, 0, 0, 0) == 0 ? true : false;
-    #endif
+#endif
     return result;
 }
 
-bool mem::protect(mem_pid_t pid, void* src, size_t size, uintptr_t protection, uintptr_t *old_protection) {
+bool mem::protect(mem_pid_t pid, void* src, size_t size, uintptr_t protection, uintptr_t *old_protection)
+{
     bool result = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     DWORD old_protect = 0;
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
     result = VirtualProtectEx(hProcess, src, size, protection, &old_protect) != 0 ? true : false;
     if (old_protection) *old_protection = old_protect;
     CloseHandle(hProcess);
-    #else
+#else
     if (old_protection) {
-    std::stringstream maps_file;
-    maps_file << "/proc/" << pid << "/maps";
-    std::ifstream maps_ifst(maps_file.str());
+        std::stringstream maps_file;
+        maps_file << "/proc/" << pid << "/maps";
+        std::ifstream maps_ifst(maps_file.str());
 
-    if(!maps_ifst.is_open()) return result;
+        if(!maps_ifst.is_open()) return result;
 
-    maps_file.str(std::string());
-    maps_file << maps_ifst.rdbuf();
+        maps_file.str(std::string());
+        maps_file << maps_ifst.rdbuf();
 
-    std::stringstream strm;
-    strm << src;
-    std::string addr = strm.str();
-    addr.erase(addr.find("0x"), 2);
-    addr = addr + "-";
+        std::stringstream strm;
+        strm << src;
+        std::string addr = strm.str();
+        addr.erase(addr.find("0x"), 2);
+        addr = addr + "-";
 
-    size_t addr_protection_path = maps_file.str().find(addr);
-    if (addr_protection_path == maps_file.str().npos) { *old_protection = 0; return result; }
+        size_t addr_protection_path = maps_file.str().find(addr);
+        if (addr_protection_path == maps_file.str().npos) { *old_protection = 0; return result; }
 
-    size_t addr_protection_start = maps_file.str().find(' ', addr_protection_path);
-    if (addr_protection_start == maps_file.str().npos) { *old_protection = 0; return result; }
+        size_t addr_protection_start = maps_file.str().find(' ', addr_protection_path);
+        if (addr_protection_start == maps_file.str().npos) { *old_protection = 0; return result; }
 
-    size_t end = addr_protection_start + 4;
+        size_t end = addr_protection_start + 4;
 
-    intptr_t prot = 0;
-    for(size_t i = addr_protection_start; i < end; i++)
-    {
-        char c = maps_file.str()[i];
-        switch(c) {
+        intptr_t prot = 0;
+        for(size_t i = addr_protection_start; i < end; i++)
+        {
+            char c = maps_file.str()[i];
+            switch(c) {
             case 'r': 	prot |= PROT_READ;		break;
             case 'w':	prot |= PROT_WRITE;		break;
             case 'x':	prot |= PROT_EXEC; 		break;
+            }
         }
-    }
-    *old_protection = prot;
-    maps_ifst.close();
+        *old_protection = prot;
+        maps_ifst.close();
     }
     result = inject_syscall(pid, __NR_mprotect, src, (void*)size, (void*)protection, 0, 0, 0) == 0 ? true : false;
-    #endif
+#endif
     return result;
 }
 
 bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
 {
     bool result = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
 
@@ -569,16 +656,16 @@ bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
         mi->base_address		= mbi.BaseAddress;
         mi->allocation_base		= mbi.AllocationBase;
         mi->allocation_protect	= mbi.AllocationProtect;
-        #if defined(_WIN64)
+#if defined(_WIN64)
         mi->partition_id		= mbi.PartitionId;
-        #endif
+#endif
         mi->size				= mbi.RegionSize;
         mi->state				= mbi.State;
         mi->protect				= mbi.Protect;
         mi->type				= mbi.Type;
     }
     CloseHandle(hProcess);
-    #else
+#else
     std::ifstream maps_ifs("/proc/" + std::to_string(pid) + "/maps");
     std::string line;
 
@@ -595,8 +682,8 @@ bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
         size_t pos = range.find('-');
 
         if (pos != std::string::npos) {
-            start = std::stoul(range.substr(0, pos), nullptr, 16);
-            end = std::stoul(range.substr(pos + 1), nullptr, 16);
+            start = std::stoull(range.substr(0, pos), nullptr, 16);
+            end = std::stoull(range.substr(pos + 1), nullptr, 16);
 
             if (address >= start && address < end) {
                 mi->base_address = reinterpret_cast<void*>(start);
@@ -617,7 +704,7 @@ bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
 
                     size_t next_pos = next_range.find('-');
                     if (next_pos != std::string::npos) {
-                        next_start = std::stoul(next_range.substr(0, next_pos), nullptr, 16);
+                        next_start = std::stoull(next_range.substr(0, next_pos), nullptr, 16);
                         mi->next_address = reinterpret_cast<void*>(next_start);
                     }
                 } else { mi->next_address = 0; }
@@ -627,18 +714,19 @@ bool mem::query(mem_pid_t pid, void* src, memory_information *mi)
             }
         }
     }
-    #endif
+#endif
     return result;
 }
 
-bool mem::read(mem_pid_t pid, void* src, void* dst, size_t size) {
+bool mem::read(mem_pid_t pid, void* src, void* dst, size_t size)
+{
     bool result = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
     result = ReadProcessMemory(hProcess, (LPCVOID)src, dst, size, 0) != 0 ? true : false;
     CloseHandle(hProcess);
-    #else
+#else
     struct iovec iosrc;
     struct iovec iodst;
     iodst.iov_base = dst;
@@ -646,18 +734,19 @@ bool mem::read(mem_pid_t pid, void* src, void* dst, size_t size) {
     iosrc.iov_base = src;
     iosrc.iov_len  = size;
     result = (size_t)process_vm_readv(pid, &iodst, 1, &iosrc, 1, 0) == size ? true : false;
-    #endif
+#endif
     return result;
 }
 
-bool mem::write(mem_pid_t pid, void* src, void* dst, size_t size) {
+bool mem::write(mem_pid_t pid, void* src, void* dst, size_t size)
+{
     bool result = 0;
-    #if defined(_WIN32)
+#if defined(_WIN32)
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) return result;
     result = WriteProcessMemory(hProcess, src, (LPCVOID)dst, size, 0) != 0 ? true : false;
     CloseHandle(hProcess);
-    #else
+#else
     struct iovec iosrc;
     struct iovec iodst;
     iosrc.iov_base = src;
@@ -665,11 +754,12 @@ bool mem::write(mem_pid_t pid, void* src, void* dst, size_t size) {
     iodst.iov_base = dst;
     iodst.iov_len = size;
     result = (size_t)process_vm_writev(pid, &iodst, 1, &iosrc, 1, 0) == size ? true : false;
-    #endif
+#endif
     return result;
 }
 
-bool mem::nop_ex(mem_pid_t pid, void* src, size_t size) {
+bool mem::nop_ex(mem_pid_t pid, void* src, size_t size)
+{
     bool result = 0;
     std::vector<uint8_t> nop;
     nop.resize(size);
@@ -678,7 +768,8 @@ bool mem::nop_ex(mem_pid_t pid, void* src, size_t size) {
     return result;
 }
 
-uintptr_t mem::read_pointer(mem_pid_t pid, uintptr_t src, std::vector<uintptr_t> offsets) {
+uintptr_t mem::read_pointer(mem_pid_t pid, uintptr_t src, std::vector<uintptr_t> offsets)
+{
     uintptr_t addr = src;
     for (unsigned int i = 0; i < offsets.size(); ++i)
     {

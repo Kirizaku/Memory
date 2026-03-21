@@ -1,7 +1,7 @@
 /*
 * Memory Hacking Library C++
 * by Daniil Nabiulin
-* version 1.0.3
+* version 1.0.4
 * https://github.com/kirizaku/memory
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -58,24 +58,23 @@ namespace mem {
     #endif
 
     struct memory_information {
-        void* base_address;
+        void* base_address = nullptr;
         #if defined(_WIN32)
-        void* allocation_base;
-        uintptr_t allocation_protect;
-        uintptr_t  state;
+        void* allocation_base = nullptr;
+        uintptr_t allocation_protect = 0;
+        uintptr_t state = 0;
         #else
-        void* next_address;
+        void* next_address = nullptr;
         #endif
         #if defined(_WIN64)
         WORD partition_id;
         #endif
-        size_t size;
-        uintptr_t  protect;
-        uintptr_t  type;
+        size_t size = 0;
+        uintptr_t protect = 0;
+        uintptr_t type = 0;
     };
 
-    struct protection
-    {
+    struct protection {
         #if defined(_WIN32)
         static const uintptr_t NONE = 0x1;
         static const uintptr_t EXECUTE = 0x10;
@@ -91,15 +90,26 @@ namespace mem {
         #endif
     };
 
+    struct module_handle_t {
+        void* handle = nullptr;
+        uintptr_t base = 0;
+    };
+
     #if defined(__linux__)
+
+    struct inject_call_result_t {
+        bool success = false;
+        void* value = nullptr;
+    };
+
     extern void* inject_syscall(mem_pid_t pid, int syscall_id, void* arg0, void* arg1, void* arg2, void* arg3, void* arg4, void* arg5);
-    extern void* inject_call_function(mem_pid_t pid, void* code_addr, void* dlopen_addr, void* arg0, void* arg1);
-    extern uintptr_t get_dlopen_address();
+    extern inject_call_result_t inject_call_function(mem_pid_t pid, void* code_addr, void* dlopen_addr, void* arg0, void* arg1);
     #endif
     extern mem_pid_t get_pid(string_t process_name);
     extern string_t get_process_name(mem_pid_t pid);
     extern uintptr_t get_module(mem_pid_t pid, string_t module_name);
-    extern uintptr_t load_module(mem_pid_t pid, string_t path);
+    extern module_handle_t load_module(mem_pid_t pid, string_t path);
+    extern bool unload_module(mem_pid_t pid, module_handle_t module);
     extern void* allocate(mem_pid_t pid, void* src, size_t size, uintptr_t protection);
     extern bool deallocate(mem_pid_t pid, void* src, size_t size);
     extern bool protect(mem_pid_t pid, void* src, size_t size, uintptr_t protection, uintptr_t *old_protection);
