@@ -13,7 +13,4 @@ add_executable(test-target test-target.cpp)
 
 # Test library
 add_library(test-library SHARED test-library.cpp)
-
-if(UNIX)
-    set_target_properties(test-library PROPERTIES PREFIX "")
-endif()
+set_target_properties(test-library PROPERTIES PREFIX "")
